@@ -1,0 +1,51 @@
+# Weekly read-only audit of a Supabase database, plus the access tests on every push.
+# Copy to .github/workflows/. Needs two repository secrets:
+#   AUDIT_DATABASE_URL  connection string of a read-only role (pg_read_all_stats is enough)
+#   TEST_DATABASE_URL   connection string of a NON-production project that has pgTAP
+name: Supabase audit
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  pull_request:
+    paths: ['supabase/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the read-only detection queries
+        env:
+          DATABASE_URL: ${{ secrets.AUDIT_DATABASE_URL }}
+        run: bash .claude/skills/supabase-audit/scripts/audit.sh audit-report.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: audit-report.txt
+      - name: Fail when risky objects grow past the committed baseline
+        env:
+          DATABASE_URL: ${{ secrets.AUDIT_DATABASE_URL }}
+        run: bash .claude/skills/supabase-audit/scripts/gate.sh
+
+  access-tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the pgTAP access tests on the test project
+        env:
+          DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
+        run: |
+          for f in supabase/tests/*_test.sql; do
+            echo "== $f"
+            psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -f "$f" | tee out.txt
+            ! grep -qE '^not ok|Looks like you failed' out.txt
+          done
